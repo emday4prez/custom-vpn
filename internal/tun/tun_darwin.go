@@ -7,9 +7,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+type ctlInfo struct {
+	Id   uint32
+	Name [96]byte // MAX_KCTL_NAME is exactly 96 bytes in macOS
+}
 
 // start local interceptor
 func Start() {
@@ -21,21 +27,29 @@ func Start() {
 		log.Fatalf("failed to create system socket: %v, err")
 	}
 
-	//connect to apple utun control
+	info := &ctlInfo{}
+	copy(info.Name[:], []byte("com.apple.net.utun_control"))
 
-	ctlInfo := &unix.SockaddrCtl{
-		ID:   0,
-		Unit: 0,
+	// 3. Make the raw syscall to CTLIOCGINFO (Get Control Info)
+	// 0xC0644E03 is the raw hexadecimal value for the CTLIOCGINFO command in the macOS kernel.
+	// We use unsafe.Pointer to hand the kernel the memory address of our info struct so it can write the ID into it.
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(0xC0644E03), uintptr(unsafe.Pointer(info)))
+	if errno != 0 {
+		log.Fatalf("Failed to get ctl info via raw syscall: %v", errno)
 	}
 
-	copy(ctlInfo.Name[:], []byte("com.apple.net.utun_control"))
+	// 4. Connect to the Apple UTUN Control subsystem using the ID the kernel just wrote into our struct
+	ctlAddr := &unix.SockaddrCtl{
+		ID:   info.Id,
+		Unit: 0, // Let the OS pick the next available utun number
+	}
 
-	if err := unix.Connect(fd, ctlInfo); err != nil {
+	if err := unix.Connect(fd, ctlAddr); err != nil {
 		log.Fatalf("Failed to connect to utun control: %v", err)
 	}
 
 	// which interface was assigned, get name from kernal
-	name, err := unix.GetsockoptString(fd, unix.SYSPROTO_CONTROL, 2)
+	name, err := unix.GetsockoptString(fd, 2, 2)
 	if err != nil {
 		log.Fatalf("Failed to get utun name: %v", err)
 	}
